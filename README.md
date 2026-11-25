@@ -1,172 +1,93 @@
-# Explain Like I’m a 500M-Parameter Model: Sequential LLM Knowledge Distillation
+<div align="center">
 
-A novel framework for compressing large language models through progressive distillation with intermediate teacher assistants.
+# Explain Like I'm a 500M-Parameter Model
 
-## Overview
+**Sequential LLM knowledge distillation: shrink a 7B model to 0.5B through a 1.5B "teacher assistant", and the small model ends up better than one distilled directly.**
 
-KPOD addresses a fundamental challenge in knowledge distillation: **when the capacity gap between teacher and student is too large, direct distillation fails**. We propose progressive distillation through intermediate-sized models, decomposing a 14× compression into manageable steps.
+[Report](Report.pdf) &nbsp;·&nbsp; [How it works](#how-it-works) &nbsp;·&nbsp; [Results](#results) &nbsp;·&nbsp; [Run it](#run-it)
 
-### Key Results
+![Python](https://img.shields.io/badge/python-3-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-EE4C2C?logo=pytorch&logoColor=white)
+![Hugging Face](https://img.shields.io/badge/models-Hugging%20Face-FFD21E?logo=huggingface&logoColor=black)
+![Built on DistillKit](https://img.shields.io/badge/built%20on-DistillKit-informational)
+![Research](https://img.shields.io/badge/status-research-informational)
 
-| Model | Parameters | Perplexity ↓ | Top-1 Acc ↑ | KL Div ↓ |
-|-------|-----------|--------------|-------------|----------|
-| Teacher (Arcee-Spark) | 7.0B | 2.89 | 75.68% | - |
-| **Direct 0.5B** | 0.5B | 2.28 | 78.30% | 6522.56 |
-| **Sequential 0.5B (KPOD)** | **0.5B** | **1.76** | **85.05%** | **6072.96** |
+</div>
 
-**KPOD achieves 22.8% lower perplexity and 8.6% higher accuracy compared to direct distillation.**
+## How it works, in one page
 
-## Architecture
+- **The problem:** knowledge distillation trains a small student to imitate a large teacher, but when the capacity gap is large (here 14×, 7B to 0.5B), the student can't follow and quality drops sharply.
+- **What this does:** it splits the jump into two steps. The 7B teacher distills into a 1.5B intermediate, which then distills into the 0.5B student. A **parallel** variant, where both students learn from the 7B teacher at once, is the comparison.
+- **What was found:** on a held-out test set, the sequentially distilled 0.5B model beats the directly distilled one on every metric, and even beats the 7B teacher on perplexity and top-1 accuracy (attributed to specializing on the training distribution).
 
-```
-Sequential Distillation:
-Teacher (7B) → Intermediate (1.5B) → Student (0.5B)
-   [Stage 1: 4.7× compression] → [Stage 2: 3× compression]
+> [!NOTE]
+> **A University of Michigan group project** by Devashish Juyal, Erik Nielsen, Rohan Singh and Krish Kapoor. The project was motivated by Keypoint-based Progressive Distillation (KPOD); for tractability, the final experiments use **logit-level distillation** (matching the teacher's token distributions) rather than full keypoint alignment. The `KPOD/` folder holds the earlier, fuller KPOD implementation work.
 
-Parallel Distillation:
-Teacher (7B) ─┬→ Intermediate (1.5B) → Student (0.5B)
-              └────────────────────────→ (co-training)
-```
+---
 
-### Sequential Distillation
+## How it works
 
-```python
-from kpod import SequentialDistillation
-
-# Initialize distillation pipeline
-distiller = SequentialDistillation(
-    teacher_model="arcee-ai/Arcee-Spark",
-    intermediate_model="Qwen/Qwen2-1.5B",
-    student_model="Qwen/Qwen2-0.5B",
-    dataset="mlabonne/FineTome-100k",
-    temperature=2.0,
-    alpha=0.5  # distillation coefficient
-)
-
-# Stage 1: Teacher → Intermediate
-distiller.train_stage1(
-    output_dir="./results/intermediate",
-    num_epochs=3,
-    learning_rate=2e-5
-)
-
-# Stage 2: Intermediate → Student
-distiller.train_stage2(
-    output_dir="./results/student",
-    num_epochs=3,
-    learning_rate=2e-5
-)
+```mermaid
+flowchart LR
+    T[Teacher<br/>Arcee-Spark 7B<br/>frozen] -- logit distillation<br/>4.7× --> I[Intermediate<br/>Qwen2-1.5B]
+    I -- logit distillation<br/>3× --> S[Student<br/>Qwen2-0.5B, 2nd gen]
+    T -. direct distillation<br/>14× .-> D[Student<br/>Qwen2-0.5B, direct]
 ```
 
-### Parallel Distillation
+1. **Teacher.** Arcee-Spark (7B) is frozen and serves only as a source of soft targets.
+2. **Stage 1.** Qwen2-1.5B learns to match the teacher's token-level output distribution (KL divergence on temperature-scaled logits, mixed with the usual cross-entropy).
+3. **Stage 2.** Qwen2-0.5B learns from the trained 1.5B model, not from the 7B teacher.
+4. **Baseline.** A second Qwen2-0.5B learns directly from the 7B teacher with the same data and hyperparameters.
 
-```python
-from kpod import ParallelDistillation
-
-distiller = ParallelDistillation(
-    teacher_model="arcee-ai/Arcee-Spark",
-    intermediate_model="Qwen/Qwen2-1.5B",
-    student_model="Qwen/Qwen2-0.5B",
-    dataset="mlabonne/FineTome-100k"
-)
-
-distiller.train(
-    output_dir="./results/parallel",
-    num_epochs=3
-)
-```
-
-## Evaluation
-
-```python
-from kpod import evaluate_model
-
-results = evaluate_model(
-    model_path="./results/student",
-    test_dataset="mlabonne/FineTome-100k",
-    metrics=["perplexity", "top_k_accuracy", "kl_divergence"]
-)
-
-print(results)
-```
-
-## Key Features
-
-- ✅ **Progressive Distillation**: Gradual capacity reduction through intermediate models
-- ✅ **Sequential & Parallel Variants**: Choose based on quality vs. speed trade-off
-- ✅ **Keypoint Extraction**: Emphasize critical reasoning steps (KL-based)
-- ✅ **Memory Efficient**: Gradient accumulation, mixed-precision training
-- ✅ **HPC Ready**: Optimized for cluster deployment with automatic cleanup
-- ✅ **Comprehensive Evaluation**: Perplexity, Top-k accuracy, KL divergence, qualitative analysis
-
-## Configuration
-
-Edit `configs/default_config.yaml`:
-
-```yaml
-distillation:
-  temperature: 2.0
-  alpha: 0.5  # KL vs CE weight
-  beta: 0.1   # keypoint weight
-
-training:
-  batch_size: 1
-  gradient_accumulation_steps: 8
-  learning_rate: 2e-5
-  num_epochs: 3
-  warmup_ratio: 0.1
-  weight_decay: 0.05
-
-models:
-  teacher: "arcee-ai/Arcee-Spark"
-  intermediate: "Qwen/Qwen2-1.5B"
-  student: "Qwen/Qwen2-0.5B"
-```
+All runs use the FineTome-100k instruction dataset and are evaluated on a held-out test set.
 
 ## Results
 
-### Quantitative Performance
+From Table 2 of the [report](Report.pdf), on the held-out test set with the same data and hyperparameters for every model:
 
-- **22.8% perplexity reduction** vs. direct distillation
-- **8.6% Top-1 accuracy improvement** (85.05% vs. 78.30%)
-- **6.9% lower KL divergence** (better teacher approximation)
+| Model | Perplexity ↓ | Avg loss ↓ | Top-1 ↑ | Top-5 ↑ | KL div ↓ |
+|---|---|---|---|---|---|
+| Arcee-Spark 7B (teacher) | 2.89 | 1.063 | 75.68% | 92.73% | – |
+| Qwen2-0.5B, direct | 2.28 | 0.823 | 78.30% | 93.77% | 6522.56 |
+| Qwen2-1.5B, intermediate | 1.97 | 0.676 | 81.30% | 95.48% | 6379.52 |
+| **Qwen2-0.5B, sequential** | **1.76** | **0.564** | **85.05%** | **96.31%** | **6072.96** |
 
-### Qualitative Analysis
+Against direct distillation, the sequential 0.5B model has **22.8% lower perplexity**, **31.5% lower average loss**, top-1 accuracy **85.05% vs. 78.30%**, and **6.9% lower KL divergence** from the teacher. The report also compares responses qualitatively across explanation, coding and comparison prompts.
 
-The distilled 0.5B model successfully:
-- Generates coherent, technically accurate responses
-- Maintains structured formatting (lists, code blocks, sections)
-- Produces functionally correct code implementations
-- Preserves explanation strategies and terminology
+## Features
 
-## Methodology
+- **Sequential chain runner** (`SequentialDistillation/run_sequential_chain.py`): teacher → 1.5B → 0.5B in one command, with the models, sample count and sequence length as flags.
+- **Logit and hidden-state distillation** scripts adapted from Arcee AI's [DistillKit](https://github.com/arcee-ai/DistillKit), plus a DPO variant. Hidden-state sequential distillation is currently disabled in the chain runner.
+- **Parallel distillation** scripts and a notebook in `ParallelDistillation/`.
+- **KPOD experiments** in `KPOD/`: rationale generation (including GSM8K), token weighting and training at several scales, with SLURM jobs for a cluster.
 
-### Why Progressive Distillation Works
+## Run it
 
-Direct distillation struggles with large capacity gaps (14× in our case) because the student lacks sufficient representational capacity. KPOD solves this by:
+**Prerequisites:** Python 3 with a CUDA GPU. The models are large: plan on a GPU with 24 GB of memory or more.
 
-1. **Decomposing compression**: 14× → (4.7× + 3×) manageable steps
-2. **Stable intermediate teachers**: Each stage learns from fully converged teacher
-3. **Knowledge refinement**: Sequential process acts as distillation + refinement
+```bash
+git clone https://github.com/juyal-devashish/ELI500Model-Sequential-Distillation.git
+cd ELI500Model-Sequential-Distillation
+pip install -r requirements.txt
+cd SequentialDistillation
+python run_sequential_chain.py --help
+python run_sequential_chain.py --base-output-dir ./results --num-samples 1000 --max-length 1024
+```
 
-### Comparison to Baseline Methods
+Defaults: teacher `arcee-ai/Arcee-Spark`, intermediate `Qwen/Qwen2-1.5B`, student `Qwen/Qwen2-0.5B`. `--teacher`, `--student-a` and `--student-b` change them.
 
-| Method | Teacher→Student | Perplexity | Top-1 Acc | Training Time |
-|--------|----------------|------------|-----------|---------------|
-| Direct Distillation | 7B → 0.5B | 2.28 | 78.30% | 1× |
-| Sequential KPOD | 7B → 1.5B → 0.5B | **1.76** | **85.05%** | 2× |
-| Parallel KPOD | 7B → [1.5B, 0.5B] | 1.81 | 84.12% | 1.2× |
+## Repository layout
 
-## Hardware Requirements
-
-- **Minimum**: 1× GPU with 24GB VRAM (e.g., RTX 3090, A5000)
-- **Recommended**: 1× GPU with 40GB+ VRAM (e.g., A100)
-- **CPU RAM**: 32GB+
-- **Storage**: ~50GB for models and checkpoints
+```
+SequentialDistillation/   the sequential chain runner and DistillKit-based logit, hidden-state and DPO scripts
+ParallelDistillation/     parallel distillation scripts and notebook
+KPOD/                     keypoint-based progressive distillation experiments, rationale generation, SLURM jobs
+Report.pdf                the final report, with methods, results and qualitative comparisons
+Project-Proposal.pdf      the original proposal
+KPOD.pdf                  the KPOD paper this project builds on
+```
 
 ## Acknowledgments
 
-- Built on top of [DistillKit](https://github.com/arcee-ai/DistillKit) by Arcee AI
-- Uses models from [Qwen2](https://huggingface.co/Qwen) and [Arcee-Spark](https://huggingface.co/arcee-ai/Arcee-Spark)
-- Dataset: [FineTome-100k](https://huggingface.co/datasets/mlabonne/FineTome-100k) by mlabonne
-
+- Built on [DistillKit](https://github.com/arcee-ai/DistillKit) by Arcee AI (Apache 2.0; its license is kept in `SequentialDistillation/LICENSE`).
+- Models: [Qwen2](https://huggingface.co/Qwen) and [Arcee-Spark](https://huggingface.co/arcee-ai/Arcee-Spark). Dataset: [FineTome-100k](https://huggingface.co/datasets/mlabonne/FineTome-100k) by mlabonne.
